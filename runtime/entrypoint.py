@@ -31,7 +31,13 @@ def stop_all(procs):
 def main() -> int:
     procs = []
     procs.append(
-        spawn("redis", ["redis-server", "--dir", "/data/redis", "--appendonly", "yes"])
+        spawn("redis", [
+            "redis-server",
+            "--dir", "/data/redis",
+            "--appendonly", "yes",
+            "--protected-mode", "no",
+            "--bind", "0.0.0.0",
+        ])
     )
     procs.append(
         spawn(
