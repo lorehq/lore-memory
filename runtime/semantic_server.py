@@ -37,6 +37,16 @@ class ActivityRequest(BaseModel):
 class ReindexPathRequest(BaseModel):
     path: str
 
+class HotWriteRequest(BaseModel):
+    key: str
+    content: str = ""
+    scope: str = "project"
+    project: str = ""
+    type: str = "fact"
+    name: str = ""
+    description: str = ""
+    body: str = ""
+
 
 class State:
     def __init__(self) -> None:
@@ -191,6 +201,20 @@ def record_activity(req: ActivityRequest):
 @app.get("/memory/hot")
 def get_hot(limit: int = 5):
     return state.memory.get_hot_primitives(limit=limit)
+
+@app.post("/memory/hot/write")
+def hot_write(req: HotWriteRequest):
+    full_key = state.memory.hot_write(
+        key=req.key, scope=req.scope, project=req.project,
+        content=req.content, type_=req.type,
+        name=req.name, description=req.description, body=req.body,
+    )
+    return {"ok": True, "key": full_key}
+
+@app.get("/memory/hot/recall")
+def hot_recall(limit: int = 10, scope: str = "project", project: str = ""):
+    facts = state.memory.hot_recall(limit=limit, scope=scope, project=project)
+    return {"ok": True, "facts": facts}
 
 @app.get("/health")
 def health() -> Dict[str, object]:
