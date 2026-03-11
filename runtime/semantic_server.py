@@ -38,11 +38,12 @@ class ReindexPathRequest(BaseModel):
     path: str
 
 class HotWriteRequest(BaseModel):
-    key: str
+    topic: str
     content: str = ""
-    scope: str = "project"
-    project: str = ""
-    type: str = "fact"
+    scope: str
+    project: str
+    type: str
+    session_ref: str = ""
     name: str = ""
     description: str = ""
     body: str = ""
@@ -205,16 +206,25 @@ def get_hot(limit: int = 5):
 @app.post("/memory/hot/write")
 def hot_write(req: HotWriteRequest):
     full_key = state.memory.hot_write(
-        key=req.key, scope=req.scope, project=req.project,
-        content=req.content, type_=req.type,
+        topic=req.topic, scope=req.scope, project=req.project,
+        type_=req.type, content=req.content,
+        session_ref=req.session_ref,
         name=req.name, description=req.description, body=req.body,
     )
     return {"ok": True, "key": full_key}
 
 @app.get("/memory/hot/recall")
-def hot_recall(limit: int = 10, scope: str = "project", project: str = ""):
-    facts = state.memory.hot_recall(limit=limit, scope=scope, project=project)
+def hot_recall(limit: int = 10, scope: str = "project", project: str = "",
+               session_id: str = ""):
+    facts = state.memory.hot_recall(
+        limit=limit, scope=scope, project=project, session_id=session_id,
+    )
     return {"ok": True, "facts": facts}
+
+@app.get("/memory/hot/stats")
+def hot_stats(project: str = "", session_id: str = ""):
+    stats = state.memory.hot_stats(project=project, session_id=session_id)
+    return {"ok": True, "stats": stats}
 
 @app.get("/health")
 def health() -> Dict[str, object]:
