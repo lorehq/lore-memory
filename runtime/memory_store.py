@@ -192,6 +192,23 @@ class MemoryStore:
             "session": session_count,
         }
 
+    def hot_delete(self, scope: str, project: str, topic: str,
+                   session_id: str = "") -> bool:
+        """Delete a hot memory entry by scope + topic. Returns True if found."""
+        full_key = self._scoped_key(scope, project, topic, session_id=session_id)
+        existed = self._r.delete(full_key) > 0
+        if existed:
+            pipe = self._r.pipeline()
+            pipe.srem("lore:hot:idx:all", full_key)
+            if scope == "session":
+                pipe.srem(f"lore:hot:idx:session:{session_id}", full_key)
+            elif scope == "global":
+                pipe.srem("lore:hot:idx:global", full_key)
+            else:
+                pipe.srem(f"lore:hot:idx:project:{project}", full_key)
+            pipe.execute()
+        return existed
+
     def get_faded_primitives(self, threshold: float = 0.1, decay_half_life_days: float = 7.0):
         decay_constant = math.log(2) / (decay_half_life_days * 24 * 3600)
         now = int(time.time())

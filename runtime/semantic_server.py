@@ -37,6 +37,12 @@ class ActivityRequest(BaseModel):
 class ReindexPathRequest(BaseModel):
     path: str
 
+class HotDeleteRequest(BaseModel):
+    topic: str
+    scope: str
+    project: str
+    session_ref: str = ""
+
 class HotWriteRequest(BaseModel):
     topic: str
     content: str = ""
@@ -49,16 +55,26 @@ class HotWriteRequest(BaseModel):
     body: str = ""
 
 
+HOT_PATH_PREFIX = "hot:"
+
+
 class State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.model = TextEmbedding(model_name=EMBED_MODEL, local_files_only=True)
+        # DATABANK file index
         self.chunks_by_path: Dict[str, List[Chunk]] = {}
         self.vectors_by_path: Dict[str, np.ndarray] = {}
         self.chunks: List[Chunk] = []
         self.vectors = np.zeros((0, 1), dtype=np.float32)
         self.file_count = 0
         self.chunk_count = 0
+        # Hot memory index (separate from DATABANK)
+        self.hot_chunks: List[Chunk] = []
+        self.hot_vectors = np.zeros((0, 1), dtype=np.float32)
+        self.hot_entries: Dict[str, Chunk] = {}
+        self.hot_entry_vectors: Dict[str, np.ndarray] = {}
+        self.hot_count = 0
         self.last_indexed_at = 0.0
         self.memory = MemoryStore(redis_url=REDIS_URL)
 
@@ -74,6 +90,82 @@ class State:
             self.chunks_by_path = chunks_by_path
             self.vectors_by_path = vectors_by_path
             self.refresh_locked()
+
+    def rebuild_hot(self) -> None:
+        """Load all hot memory entries from Redis and embed them."""
+        all_keys = self.memory._r.smembers("lore:hot:idx:all")
+        if not all_keys:
+            with self.lock:
+                self.hot_entries.clear()
+                self.hot_entry_vectors.clear()
+                self._refresh_hot_locked()
+            return
+
+        pipe = self.memory._r.pipeline()
+        key_list = list(all_keys)
+        for k in key_list:
+            pipe.hgetall(k)
+        results = pipe.execute()
+
+        entries: Dict[str, Chunk] = {}
+        entry_vectors: Dict[str, np.ndarray] = {}
+        for full_key, data in zip(key_list, results):
+            if not data:
+                continue
+            text = _hot_entry_text(full_key, data)
+            if not text:
+                continue
+            norm = normalize(text)
+            if not norm:
+                continue
+            path = f"{HOT_PATH_PREFIX}{full_key}"
+            chunk = Chunk(path=path, chunk_id=path, text=norm)
+            entries[full_key] = chunk
+            vec = embed_chunks(self.model, [chunk])
+            entry_vectors[full_key] = vec
+
+        with self.lock:
+            self.hot_entries = entries
+            self.hot_entry_vectors = entry_vectors
+            self._refresh_hot_locked()
+
+    def index_hot_entry(self, full_key: str, data: Dict[str, str]) -> None:
+        """Embed a single hot memory entry and add to the hot index."""
+        text = _hot_entry_text(full_key, data)
+        if not text:
+            return
+        norm = normalize(text)
+        if not norm:
+            return
+        path = f"{HOT_PATH_PREFIX}{full_key}"
+        chunk = Chunk(path=path, chunk_id=path, text=norm)
+        vec = embed_chunks(self.model, [chunk])
+        with self.lock:
+            self.hot_entries[full_key] = chunk
+            self.hot_entry_vectors[full_key] = vec
+            self._refresh_hot_locked()
+
+    def remove_hot_entry(self, full_key: str) -> None:
+        """Remove a hot memory entry from the hot index."""
+        with self.lock:
+            removed = self.hot_entries.pop(full_key, None) is not None
+            self.hot_entry_vectors.pop(full_key, None)
+            if removed:
+                self._refresh_hot_locked()
+
+    def _refresh_hot_locked(self) -> None:
+        chunks: List[Chunk] = []
+        mats: List[np.ndarray] = []
+        for key in sorted(self.hot_entries.keys()):
+            chunk = self.hot_entries[key]
+            vec = self.hot_entry_vectors.get(key)
+            if vec is None or vec.shape[0] == 0:
+                continue
+            chunks.append(chunk)
+            mats.append(vec)
+        self.hot_chunks = chunks
+        self.hot_vectors = np.vstack(mats) if mats else np.zeros((0, 1), dtype=np.float32)
+        self.hot_count = len(chunks)
 
     def reindex_file(self, rel: str) -> bool:
         rel = rel.replace("\\", "/").lstrip("/")
@@ -107,6 +199,18 @@ class State:
         self.file_count = len(self.chunks_by_path)
         self.chunk_count = len(self.chunks)
         self.last_indexed_at = time.time()
+
+
+def _hot_entry_text(full_key: str, data: Dict[str, str]) -> str:
+    """Build searchable text from a hot memory Redis hash."""
+    parts = []
+    topic = full_key.rsplit(":", 1)[-1] if ":" in full_key else full_key
+    parts.append(topic)
+    for field in ("name", "description", "content", "body"):
+        val = data.get(field, "").strip()
+        if val:
+            parts.append(val)
+    return " ".join(parts)
 
 
 def markdown_files() -> List[Path]:
@@ -192,6 +296,7 @@ state = State()
 @app.on_event("startup")
 def startup() -> None:
     state.rebuild()
+    state.rebuild_hot()
 
 
 @app.post("/activity")
@@ -211,7 +316,26 @@ def hot_write(req: HotWriteRequest):
         session_ref=req.session_ref,
         name=req.name, description=req.description, body=req.body,
     )
+    # Index into hot search index
+    data = {
+        "name": req.name, "description": req.description,
+        "content": req.content, "body": req.body,
+    }
+    state.index_hot_entry(full_key, data)
     return {"ok": True, "key": full_key}
+
+@app.post("/memory/hot/delete")
+def hot_delete(req: HotDeleteRequest):
+    full_key = state.memory._scoped_key(
+        req.scope, req.project, req.topic, session_id=req.session_ref,
+    )
+    existed = state.memory.hot_delete(
+        scope=req.scope, project=req.project, topic=req.topic,
+        session_id=req.session_ref,
+    )
+    if existed:
+        state.remove_hot_entry(full_key)
+    return {"ok": True, "deleted": existed, "key": full_key}
 
 @app.get("/memory/hot/recall")
 def hot_recall(limit: int = 10, scope: str = "project", project: str = "",
@@ -237,6 +361,7 @@ def health() -> Dict[str, object]:
             "max_k": MAX_K,
             "file_count": state.file_count,
             "chunk_count": state.chunk_count,
+            "hot_count": state.hot_count,
             "last_indexed_at": state.last_indexed_at,
         }
 
@@ -274,21 +399,34 @@ def search(
     mode: str = Query(RESULT_MODE),
 ) -> Response:
     with state.lock:
-        chunks = state.chunks
-        vectors = state.vectors
+        db_chunks = state.chunks
+        db_vectors = state.vectors
+        hot_chunks = state.hot_chunks
+        hot_vectors = state.hot_vectors
         model = state.model
 
-    if not chunks or vectors.shape[0] == 0:
+    all_chunks = db_chunks + hot_chunks
+    if not all_chunks:
         return compact({"query": q, "results": []})
 
+    # Build combined vector matrix
+    mats = []
+    if db_vectors.shape[0] > 0:
+        mats.append(db_vectors)
+    if hot_vectors.shape[0] > 0:
+        mats.append(hot_vectors)
+    if not mats:
+        return compact({"query": q, "results": []})
+    combined = np.vstack(mats)
+
     qv = embed_query(model, q)
-    scores = vectors @ qv
+    scores = combined @ qv
     top = np.argsort(scores)[::-1][:k]
 
     if mode == "paths_min":
         best: Dict[str, float] = {}
         for idx in top:
-            chunk = chunks[int(idx)]
+            chunk = all_chunks[int(idx)]
             score = float(scores[int(idx)])
             prev = best.get(chunk.path)
             if prev is None or score > prev:
@@ -301,7 +439,7 @@ def search(
 
     results = []
     for idx in top:
-        chunk = chunks[int(idx)]
+        chunk = all_chunks[int(idx)]
         score = float(scores[int(idx)])
         results.append(
             {
@@ -309,6 +447,7 @@ def search(
                 "chunk_id": chunk.chunk_id,
                 "score": round(score, 6),
                 "snippet": chunk.text[:SNIPPET_CHARS],
+                "source": "hot" if chunk.path.startswith(HOT_PATH_PREFIX) else "databank",
             }
         )
     return compact({"query": q, "results": results})
