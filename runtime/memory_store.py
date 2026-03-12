@@ -162,10 +162,10 @@ class MemoryStore:
 
             entry = {
                 "topic": display_topic,
-                "scope": data["scope"],
+                "scope": data.get("scope", "global"),
                 "score": score,
-                "type": data["type"],
-                "content": data["content"],
+                "type": data.get("type", "memory"),
+                "content": data.get("content", ""),
             }
             if "description" in data:
                 entry["description"] = data["description"]
