@@ -34,14 +34,17 @@ class Chunk:
 class ActivityRequest(BaseModel):
     path: str
 
+
 class ReindexPathRequest(BaseModel):
     path: str
+
 
 class HotDeleteRequest(BaseModel):
     topic: str
     scope: str
     project: str
     session_ref: str = ""
+
 
 class HotWriteRequest(BaseModel):
     topic: str
@@ -164,7 +167,9 @@ class State:
             chunks.append(chunk)
             mats.append(vec)
         self.hot_chunks = chunks
-        self.hot_vectors = np.vstack(mats) if mats else np.zeros((0, 1), dtype=np.float32)
+        self.hot_vectors = (
+            np.vstack(mats) if mats else np.zeros((0, 1), dtype=np.float32)
+        )
         self.hot_count = len(chunks)
 
     def reindex_file(self, rel: str) -> bool:
@@ -282,14 +287,17 @@ def compact(data: Dict[str, object]) -> Response:
     )
 
 
-app = FastAPI(title="Lore Memory", version="0.1.5")
+app = FastAPI(title="Lore Memory", version="0.1.53")
 LORE_TOKEN = os.getenv("LORE_TOKEN")
+
 
 @app.middleware("http")
 async def authorize_request(request, call_next):
     if LORE_TOKEN and request.headers.get("Authorization") != f"Bearer {LORE_TOKEN}":
         return Response(status_code=401, content="Unauthorized")
     return await call_next(request)
+
+
 state = State()
 
 
@@ -304,51 +312,73 @@ def record_activity(req: ActivityRequest):
     state.memory.record_access(req.path)
     return {"ok": True}
 
+
 @app.get("/memory/hot")
 def get_hot(limit: int = 5):
     return state.memory.get_hot_primitives(limit=limit)
 
+
 @app.post("/memory/hot/write")
 def hot_write(req: HotWriteRequest):
     full_key = state.memory.hot_write(
-        topic=req.topic, scope=req.scope, project=req.project,
-        type_=req.type, content=req.content,
+        topic=req.topic,
+        scope=req.scope,
+        project=req.project,
+        type_=req.type,
+        content=req.content,
         session_ref=req.session_ref,
-        name=req.name, description=req.description, body=req.body,
+        name=req.name,
+        description=req.description,
+        body=req.body,
     )
     # Index into hot search index
     data = {
-        "name": req.name, "description": req.description,
-        "content": req.content, "body": req.body,
+        "name": req.name,
+        "description": req.description,
+        "content": req.content,
+        "body": req.body,
     }
     state.index_hot_entry(full_key, data)
     return {"ok": True, "key": full_key}
 
+
 @app.post("/memory/hot/delete")
 def hot_delete(req: HotDeleteRequest):
     full_key = state.memory._scoped_key(
-        req.scope, req.project, req.topic, session_id=req.session_ref,
+        req.scope,
+        req.project,
+        req.topic,
+        session_id=req.session_ref,
     )
     existed = state.memory.hot_delete(
-        scope=req.scope, project=req.project, topic=req.topic,
+        scope=req.scope,
+        project=req.project,
+        topic=req.topic,
         session_id=req.session_ref,
     )
     if existed:
         state.remove_hot_entry(full_key)
     return {"ok": True, "deleted": existed, "key": full_key}
 
+
 @app.get("/memory/hot/recall")
-def hot_recall(limit: int = 10, scope: str = "project", project: str = "",
-               session_id: str = ""):
+def hot_recall(
+    limit: int = 10, scope: str = "working", project: str = "", session_id: str = ""
+):
     facts = state.memory.hot_recall(
-        limit=limit, scope=scope, project=project, session_id=session_id,
+        limit=limit,
+        scope=scope,
+        project=project,
+        session_id=session_id,
     )
     return {"ok": True, "facts": facts}
+
 
 @app.get("/memory/hot/stats")
 def hot_stats(project: str = "", session_id: str = ""):
     stats = state.memory.hot_stats(project=project, session_id=session_id)
     return {"ok": True, "stats": stats}
+
 
 @app.get("/health")
 def health() -> Dict[str, object]:
@@ -447,7 +477,9 @@ def search(
                 "chunk_id": chunk.chunk_id,
                 "score": round(score, 6),
                 "snippet": chunk.text[:SNIPPET_CHARS],
-                "source": "hot" if chunk.path.startswith(HOT_PATH_PREFIX) else "databank",
+                "source": "hot"
+                if chunk.path.startswith(HOT_PATH_PREFIX)
+                else "databank",
             }
         )
     return compact({"query": q, "results": results})
